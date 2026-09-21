@@ -1,0 +1,7 @@
+UCLA nodes 1.0
+# sample
+NumNodes : 3
+NumTerminals : 1
+cellA 10 10
+cellB 10 10
+term1 20 20 terminal

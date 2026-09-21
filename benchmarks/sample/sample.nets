@@ -1,0 +1,11 @@
+UCLA nets 1.0
+NumNets : 2
+NumPins : 4
+
+NetDegree : 2 net0
+cellA I : 5 5
+cellB O : 5 5
+
+NetDegree : 2 net1
+cellB I : 5 5
+term1 O : 10 10
