@@ -8,6 +8,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(placer
     src/main.cpp
+    src/algorithms/local_sa_placer.cpp
+    src/algorithms/random_placement.cpp
     src/database/placement_db.cpp
     src/database/placement_state.cpp
     src/database/validation_report.cpp
