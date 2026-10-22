@@ -4,6 +4,7 @@
 #include <string>
 
 #include "algorithms/local_sa_placer.h"
+#include "algorithms/quadratic_analytical_placement.h"
 #include "algorithms/random_placement.h"
 #include "io/summary_writer.h"
 #include "metrics/hpwl.h"
@@ -83,5 +84,31 @@ int main(int argc, char* argv[]) {
               << sa_stats.final_temperature << '\n';
     std::cout << "    Runtime: " << std::fixed << std::setprecision(3) << sa_elapsed_ms
               << " ms\n";
+
+    // Quadratic Analytical Placement —— 独立运行，不影响 random_state / SA 的结果
+    plc::PlacementState quadratic_state = result.db.init_state;
+    plc::QuadraticAnalyticalPlacement quadratic_placer;
+    const auto qa_start_time = std::chrono::steady_clock::now();
+    quadratic_placer.run(result.db, &quadratic_state);
+    const auto qa_end_time = std::chrono::steady_clock::now();
+    const auto& qa_stats = quadratic_placer.stats();
+    const auto qa_elapsed_ms =
+        std::chrono::duration<double, std::milli>(qa_end_time - qa_start_time).count();
+
+    std::cout << "\n---------------QUADRATIC ANALYTICAL PLACEMENT---------------\n";
+    std::cout << "    Movable Cells: " << qa_stats.movable_cells << '\n';
+    std::cout << "    Outer Iterations: " << qa_stats.outer_iterations << '\n';
+    std::cout << "    Total Solver Iterations: " << qa_stats.total_solver_iterations << '\n';
+    std::cout << "    Initial HPWL: " << std::fixed << std::setprecision(2)
+              << qa_stats.initial_hpwl << '\n';
+    std::cout << "    Final HPWL: " << std::fixed << std::setprecision(2)
+              << qa_stats.final_hpwl << '\n';
+    std::cout << "    Final X Error: " << std::fixed << std::setprecision(6)
+              << qa_stats.final_x_error << '\n';
+    std::cout << "    Final Y Error: " << std::fixed << std::setprecision(6)
+              << qa_stats.final_y_error << '\n';
+    std::cout << "    Runtime: " << std::fixed << std::setprecision(3) << qa_elapsed_ms
+              << " ms\n";
+
     return 0;
 }
