@@ -12,6 +12,8 @@ public:
     void write_bookshelf_report(const PlacementDB& db, std::ostream& os) const;
     void write_design_summary(const PlacementDB& db, std::ostream& os) const;
     void write_validation_report(const ValidationReport& report, std::ostream& os) const;
+    void write_placement(const PlacementDB& db, const PlacementState& state,
+                         std::ostream& os) const;
 };
 
 }  // namespace plc
