@@ -19,3 +19,11 @@ cmake --build build
 ./build/placer <path-to-benchmark.aux>
 ./build/placer <path-to-benchmark.aux> --check-only
 ```
+
+## Task 4: Clustering-driven placement
+
+See [算法与 VS Code 运行说明](docs/任务四-聚类驱动布局.md) and [实测结果](docs/实验结果.md).
+
+```bash
+./build/placer benchmarks/adaptec1/adaptec1.aux --method compare --no-sa
+```

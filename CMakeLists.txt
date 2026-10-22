@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(placer
+    src/algorithms/clustering_placement.cpp
     src/main.cpp
     src/algorithms/local_sa_placer.cpp
     src/algorithms/random_placement.cpp
@@ -27,3 +28,12 @@ add_executable(placer
 )
 
 target_include_directories(placer PRIVATE include)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(clustering_test tests/clustering_test.cpp
+        src/algorithms/clustering_placement.cpp src/database/placement_db.cpp
+        src/database/placement_state.cpp src/metrics/hpwl.cpp)
+    target_include_directories(clustering_test PRIVATE include)
+    add_test(NAME clustering_and_hpwl COMMAND clustering_test)
+endif()
