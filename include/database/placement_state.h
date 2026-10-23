@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <vector>
 
 #include "common/enums.h"
@@ -10,6 +11,7 @@ namespace plc {
 class PlacementState {
 public:
     void resize(std::size_t num_cells);
+    std::size_t size() const { return x_.size(); }
 
     Coord x(CellId id) const;
     Coord y(CellId id) const;

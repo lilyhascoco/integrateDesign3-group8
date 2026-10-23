@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(placer
     src/algorithms/clustering_placement.cpp
     src/main.cpp
+    src/algorithms/global_placement.cpp
     src/algorithms/local_sa_placer.cpp
     src/algorithms/quadratic_analytical_placement.cpp
     src/algorithms/random_placement.cpp

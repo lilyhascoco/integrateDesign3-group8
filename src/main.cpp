@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "algorithms/clustering_placement.h"
+#include "algorithms/global_placement.h"
 #include "algorithms/local_sa_placer.h"
 #include "algorithms/quadratic_analytical_placement.h"
 #include "algorithms/random_placement.h"
@@ -18,21 +19,38 @@
 #include "parser/bookshelf_loader.h"
 
 namespace {
+
 struct Options {
     std::string method = "random", output;
     unsigned seed = 42;
     bool check_only = false, sa = false;
+    bool run_gp = false;          // task 5: run global placement after initializer
     plc::ClusteringConfig clustering;
+    plc::GlobalPlacementConfig gp_config;
 };
+
 void usage(const char* program) {
     std::cerr << "Usage: " << program << " <benchmark.aux> [options]\n"
-        << "  --method random|cluster|quadratic|compare (default random)\n"
-        << "  --seed N --clusters N --max-cluster-cells N\n"
-        << "  --sa | --no-sa (default: no SA)\n"
-        << "  --check-only --output result.pl\n"
-        << "compare runs all three independently; output becomes result.<method>.pl.\n"
-        << "Exports always contain INITIAL placement, before optional SA.\n";
+              << "  --method random|cluster|quadratic|compare   (default random)\n"
+              << "  --seed N  --clusters N  --max-cluster-cells N\n"
+              << "  --sa | --no-sa                               (default: no SA)\n"
+              << "  --global                                     (run task-5 global placement)\n"
+              << "  --iterations N  --target-density v  --target-overflow v\n"
+              << "  --bins N  --quiet                            (GP tuning)\n"
+              << "  --check-only  --output result.pl\n"
+              << "\n"
+              << "Task 4: --method random|cluster|quadratic each produce an initial placement.\n"
+              << "        --method compare runs all three independently.\n"
+              << "        --sa runs local simulated annealing after the chosen initializer.\n"
+              << "\n"
+              << "Task 5: --global runs the ePlace-style electrostatics-based global placement\n"
+              << "        after the selected initializer (random if none specified).\n"
+              << "        Tunables: --iterations, --target-density, --target-overflow, --bins, --quiet.\n"
+              << "\n"
+              << "  --output result.pl exports the placement (after GP when --global is on).\n"
+              << "  compare exports become result.<method>.pl; SA is applied per initializer.\n";
 }
+
 Options parse(int argc, char** argv) {
     Options o;
     for (int i = 2; i < argc; ++i) {
@@ -49,12 +67,18 @@ Options parse(int argc, char** argv) {
                 throw std::invalid_argument("Invalid number for " + arg);
             return static_cast<std::size_t>(n);
         };
+        auto real = [&]() -> double {
+            auto v = value();
+            if (v.empty()) throw std::invalid_argument("Invalid real for " + arg);
+            return std::stod(v);
+        };
         if (arg == "--method") o.method = value();
         else if (arg == "--output") o.output = value();
         else if (arg == "--seed") {
             auto n = number();
             if (n > std::numeric_limits<unsigned>::max()) throw std::invalid_argument("Seed out of range");
             o.seed = static_cast<unsigned>(n);
+            o.gp_config.seed = o.seed;
         } else if (arg == "--clusters") o.clustering.target_clusters = number();
         else if (arg == "--max-cluster-cells") {
             o.clustering.max_cluster_cells = number();
@@ -62,12 +86,21 @@ Options parse(int argc, char** argv) {
         } else if (arg == "--sa") o.sa = true;
         else if (arg == "--no-sa") o.sa = false;
         else if (arg == "--check-only") o.check_only = true;
+        // ---- task 5 flags ----
+        else if (arg == "--global") o.run_gp = true;
+        else if (arg == "--local-sa") { o.run_gp = true; o.sa = true; }
+        else if (arg == "--quiet") o.gp_config.verbose = false;
+        else if (arg == "--iterations") o.gp_config.max_iterations = number();
+        else if (arg == "--target-density") o.gp_config.target_density = real();
+        else if (arg == "--target-overflow") o.gp_config.target_overflow = real();
+        else if (arg == "--bins") o.gp_config.max_bins = number();
         else throw std::invalid_argument("Unknown option: " + arg);
     }
     if (o.method != "random" && o.method != "cluster" && o.method != "quadratic" && o.method != "compare")
         throw std::invalid_argument("Unknown method: " + o.method);
     return o;
 }
+
 void validate(const plc::PlacementDB& db, const plc::PlacementState& state) {
     std::size_t violations = 0;
     const auto& core = db.design.core;
@@ -81,6 +114,7 @@ void validate(const plc::PlacementDB& db, const plc::PlacementState& state) {
     std::cout << "    Boundary/Fixed Violations: " << violations << '\n';
     if (violations) throw std::runtime_error("Placement validation failed");
 }
+
 void export_initial(const plc::PlacementDB& db, const plc::PlacementState& state,
                     const Options& options, const std::string& method) {
     if (options.output.empty()) return;
@@ -99,8 +133,9 @@ void export_initial(const plc::PlacementDB& db, const plc::PlacementState& state
     }
     out.close();
     if (!out) throw std::runtime_error("Failed to write output: " + path.string());
-    std::cout << "    Initial Placement Written To: " << path.string() << '\n';
+    std::cout << "    Placement Written To: " << path.string() << '\n';
 }
+
 void run_method(const plc::PlacementDB& db, const Options& options, const std::string& method) {
     // Each method receives its own copy. No initializer sees another method's result.
     plc::PlacementState state = db.init_state;
@@ -129,9 +164,9 @@ void run_method(const plc::PlacementDB& db, const Options& options, const std::s
             stats.final_y_error >= plc::QuadraticConfig{}.target_error)
             std::cout << "    Solver Warning: residual tolerance not reached; inspect this result.\n";
     }
-    const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+    auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
     plc::HpwlEvaluator evaluator;
-    const double hpwl = evaluator.compute_total_hpwl(db, state);
+    double hpwl = evaluator.compute_total_hpwl(db, state);
     if (!std::isfinite(hpwl)) throw std::runtime_error("Non-finite HPWL");
     const double overflow = plc::RandomPlacement(options.seed).estimate_overlap_area(db, state);
     std::cout << "    Movable Cells: " << db.num_movable_cells()
@@ -140,13 +175,41 @@ void run_method(const plc::PlacementDB& db, const Options& options, const std::s
         << "\n    Bin Overflow Area: " << std::setprecision(2) << overflow
         << "\n    Bin Overflow Ratio: " << (db.movable_cell_area() > 0 ? 100 * overflow / db.movable_cell_area() : 0) << "%\n";
     validate(db, state);
+
+    // ---- task 5: global placement after initializer ----
+    if (options.run_gp) {
+        const auto gp_begin = std::chrono::steady_clock::now();
+        plc::GlobalPlacementConfig gp_cfg = options.gp_config;
+        // Reuse the initializer's seed if not explicitly overridden
+        gp_cfg.seed = (gp_cfg.seed == plc::GlobalPlacementConfig{}.seed)
+                          ? options.seed : gp_cfg.seed;
+        plc::GlobalPlacer gp(gp_cfg);
+        gp.run(db, &state);
+        const auto gp_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gp_begin).count();
+        const auto& gs = gp.stats();
+        std::cout << "\n---------------GLOBAL PLACEMENT---------------\n"
+            << "    Iterations: " << gs.iterations
+            << "\n    Bin Grid: " << gs.bins_x << " x " << gs.bins_y
+            << "\n    Fillers: " << gs.fillers
+            << "\n    Initial HPWL: " << std::fixed << std::setprecision(2) << gs.initial_hpwl
+            << "\n    Final HPWL: " << std::fixed << std::setprecision(2) << gs.final_hpwl
+            << "\n    Initial Density Overflow: " << std::fixed << std::setprecision(2) << gs.initial_overflow * 100.0 << "%"
+            << "\n    Final Density Overflow: " << std::fixed << std::setprecision(2) << gs.final_overflow * 100.0 << "%"
+            << "\n    Final Lambda: " << std::fixed << std::setprecision(4) << gs.final_lambda
+            << "\n    Runtime: " << std::setprecision(3) << gp_ms << " ms\n";
+        hpwl = gs.final_hpwl;  // update for SA below
+        validate(db, state);
+    }
+
     export_initial(db, state, options, method);
+
     if (options.sa) {
         plc::LocalSAPlacer placer({}, options.seed);
         const auto sa_begin = std::chrono::steady_clock::now();
         placer.run(db, &state);
         const auto sa_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sa_begin).count();
-        std::cout << "\n---------------LOCAL SA AFTER: " << method << "---------------\n"
+        std::cout << "\n---------------LOCAL SA AFTER: " << method
+                  << (options.run_gp ? " (post-GP)" : "") << "---------------\n"
             << "    Initial HPWL: " << placer.stats().initial_hpwl
             << "\n    Final HPWL: " << placer.stats().final_hpwl
             << "\n    Accepted Moves: " << placer.stats().accepted_moves << " / " << placer.stats().attempted_moves
@@ -157,7 +220,9 @@ void run_method(const plc::PlacementDB& db, const Options& options, const std::s
         validate(db, state);
     }
 }
-} // namespace
+
+}  // namespace
+
 int main(int argc, char** argv) {
     if (argc < 2) { usage(argv[0]); return 1; }
     try {
