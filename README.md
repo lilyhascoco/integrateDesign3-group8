@@ -16,8 +16,8 @@
 ## Build
 
 ```bash
-cmake -S . -B build
-cmake --build build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j 4
 ```
 
 ## Run
@@ -27,27 +27,59 @@ cmake --build build
 ./build/placer <path-to-benchmark.aux> --check-only
 ```
 
-常用选项：
+## Task 4: Initial placement
+
+See [算法与运行说明](docs/任务四-聚类驱动布局.md).
+
+```bash
+./build/placer benchmarks/sample/sample.aux --method compare --output build/sample.pl
+./build/placer benchmarks/adaptec1/adaptec1.aux --method compare --no-sa
+```
+
+`--method random|cluster|quadratic|compare` selects an initializer or runs all three
+independently from the same input. Default: random, without simulated annealing.
+Use `--sa` to run SA separately after each selected initializer; `--no-sa` disables
+only SA. `--check-only` parses the input without placing cells.
+Compare exports are named `sample.random.pl`, `sample.cluster.pl`, and
+`sample.quadratic.pl`. Exports contain initial placement (or post-GP placement
+when `--global` is used), before optional SA.
+All methods use the same center-offset HPWL evaluator. Bin overflow is a density
+proxy, not exact overlap or a legality guarantee. Quadratic residual warnings must
+be reviewed independently of boundary checks.
+
+## Task 5: Global placement (electrostatics model)
+
+Add `--global` to run the ePlace-style global placement after the chosen initializer
+(default initializer: random). All initializers (`--method random|cluster|quadratic|compare`)
+can be followed by `--global`.
+
+常用全局布局选项：
 
 ```bash
 --iterations <N>        最大全局布局迭代次数（默认 200）
 --target-density <v>    目标密度（默认 0.9）
 --target-overflow <v>   密度溢出率停止阈值（默认 0.1）
 --bins <N>              Bin 网格边长上限（默认 512）
---seed <N>              随机种子（默认 2024）
---output <file.pl>      导出全局布局结果（UCLA .pl 格式）
---local-sa              全局布局后继续运行局部模拟退火
+--seed <N>              随机种子（与 --method 共享；默认 42）
+--global                启用任务五全局布局
 --quiet                 关闭逐轮日志
+--local-sa              全局布局后继续运行局部模拟退火（等价于 --global --sa）
 ```
 
 例如：
 
 ```bash
-./build/placer benchmarks/sample/sample.aux --output build/sample.gp.pl
-./build/placer benchmarks/adaptec1/adaptec1.aux --iterations 200 --quiet
+# 冒烟测试：sample，允许 30% 溢出率
+./build/placer benchmarks/sample/sample.aux --global --iterations 200 --target-overflow 0.3
+
+# 主验证基准：adaptec1
+./build/placer benchmarks/adaptec1/adaptec1.aux --global --output build/adaptec1.gp.pl
+
+# 先聚类初始化 → 全局布局 → 可选 SA
+./build/placer benchmarks/adaptec1/adaptec1.aux --method cluster --global --sa --quiet
 ```
 
-## 任务五：全局布局（静电学模型）
+### 实现流程（`src/algorithms/global_placement.cpp`）
 
 目标函数与梯度：
 
@@ -55,8 +87,6 @@ cmake --build build
 f(x, y) = HPWL(x, y) + lambda * D(x, y)
 grad f  = grad HPWL + lambda * grad D
 ```
-
-实现流程（`src/algorithms/global_placement.cpp`）：
 
 1. **FillerInit**：filler 总面积 = targetDensity·coreArea − (可移动面积 + 终端在核心区面积)，
    单个 filler 边长取中间 80% 单元的平均面积开方。
@@ -84,6 +114,13 @@ sample 是一个只有 2 个可移动单元、核心区高度等于单元高度�
 因此该算例只用于功能冒烟测试：
 
 ```bash
-./build/placer benchmarks/sample/sample.aux --iterations 200 --target-overflow 0.3
+./build/placer benchmarks/sample/sample.aux --global --iterations 200 --target-overflow 0.3
 ```
 
+## Tests
+
+```bash
+ctest --test-dir build --output-on-failure
+# If Python was not discovered by CMake:
+python3 tests/cli_integration.py build/placer
+```

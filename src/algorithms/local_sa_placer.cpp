@@ -186,34 +186,7 @@ void LocalSAPlacer::run(const PlacementDB& db, PlacementState* state) {
 double LocalSAPlacer::compute_net_hpwl(const PlacementDB& db,
                                        const PlacementState& state,
                                        NetId net_id) const {
-    const Net& net = db.net(net_id);
-    if (net.degree() <= 1) {
-        return 0.0;
-    }
-
-    Coord min_x = std::numeric_limits<Coord>::max();
-    Coord min_y = std::numeric_limits<Coord>::max();
-    Coord max_x = std::numeric_limits<Coord>::lowest();
-    Coord max_y = std::numeric_limits<Coord>::lowest();
-
-    for (PinId pin_id : net.pin_ids) {
-        const Pin& pin = db.pin(pin_id);
-        const Cell& cell = db.cell(pin.cell_id);
-
-        // BookShelf positions in this project are lower-left origins. Express
-        // the absolute pin position through the cell center as requested:
-        // pin = center + (pin_offset - cell_size / 2), which is equivalent to
-        // origin + pin_offset and retains the parser's existing offset meaning.
-        const Coord center_x = state.x(cell.id) + cell.width * 0.5;
-        const Coord center_y = state.y(cell.id) + cell.height * 0.5;
-        const Coord pin_x = center_x + (pin.offset_x - cell.width * 0.5);
-        const Coord pin_y = center_y + (pin.offset_y - cell.height * 0.5);
-        min_x = std::min(min_x, pin_x);
-        min_y = std::min(min_y, pin_y);
-        max_x = std::max(max_x, pin_x);
-        max_y = std::max(max_y, pin_y);
-    }
-    return (max_x - min_x + max_y - min_y) * net.weight;
+    return HpwlEvaluator{}.compute_net_hpwl(db, state, net_id);
 }
 
 }  // namespace plc

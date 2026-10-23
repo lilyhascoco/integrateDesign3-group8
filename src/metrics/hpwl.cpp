@@ -25,8 +25,8 @@ double HpwlEvaluator::compute_net_hpwl(const PlacementDB& db, const PlacementSta
 
     for (PinId pin_id : net.pin_ids) {
         const auto& pin = db.pin(pin_id);
-        const Coord x = state.x(pin.cell_id) + pin.offset_x;
-        const Coord y = state.y(pin.cell_id) + pin.offset_y;
+        const Coord x = state.x(pin.cell_id) + db.cell(pin.cell_id).width * 0.5 + pin.offset_x;
+        const Coord y = state.y(pin.cell_id) + db.cell(pin.cell_id).height * 0.5 + pin.offset_y;
         min_x = std::min(min_x, x);
         min_y = std::min(min_y, y);
         max_x = std::max(max_x, x);
