@@ -10,6 +10,7 @@ add_executable(placer
     src/algorithms/clustering_placement.cpp
     src/main.cpp
     src/algorithms/local_sa_placer.cpp
+    src/algorithms/quadratic_analytical_placement.cpp
     src/algorithms/random_placement.cpp
     src/database/placement_db.cpp
     src/database/placement_state.cpp
@@ -32,8 +33,14 @@ target_include_directories(placer PRIVATE include)
 include(CTest)
 if(BUILD_TESTING)
     add_executable(clustering_test tests/clustering_test.cpp
+        src/algorithms/quadratic_analytical_placement.cpp src/algorithms/local_sa_placer.cpp
         src/algorithms/clustering_placement.cpp src/database/placement_db.cpp
         src/database/placement_state.cpp src/metrics/hpwl.cpp)
     target_include_directories(clustering_test PRIVATE include)
     add_test(NAME clustering_and_hpwl COMMAND clustering_test)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME cli_integration COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_integration.py" "$<TARGET_FILE:placer>")
+    endif()
 endif()

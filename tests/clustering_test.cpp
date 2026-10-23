@@ -1,3 +1,5 @@
+#include "algorithms/quadratic_analytical_placement.h"
+#include "algorithms/local_sa_placer.h"
 #include "algorithms/clustering_placement.h"
 #include "metrics/hpwl.h"
 #include <cmath>
@@ -9,6 +11,7 @@ int main() {
     for(unsigned i=0;i<5;++i) {
         plc::Cell c; c.id=i;c.width=10+i*2;c.height=10;c.init_x=120;c.init_y=220;
         c.place_status=i==4?plc::PlaceStatus::kFixed:plc::PlaceStatus::kMovable;
+        c.orient=i==4?plc::Orient::kFN:plc::Orient::kN;
         db.design.cells.push_back(c);
     }
     auto edge=[&](unsigned a,unsigned b,double weight) {
@@ -30,6 +33,17 @@ int main() {
     }
     auto distance=[&](unsigned i,unsigned j) {return std::hypot(a.x(i)-a.x(j),a.y(i)-a.y(j));};
     check(distance(0,1)<distance(0,2));check(distance(2,3)<distance(0,2));
+    plc::PlacementState quadratic_state;
+    plc::QuadraticAnalyticalPlacement quadratic;
+    quadratic.run(db, &quadratic_state);
+    check(quadratic_state.x(4)==db.cell(4).init_x);
+    check(quadratic_state.y(4)==db.cell(4).init_y);
+    check(quadratic_state.orient(4)==db.cell(4).orient);
+    plc::LocalSAConfig sa_config;sa_config.bins_x=1;sa_config.bins_y=1;sa_config.max_iterations=20;
+    const double before_sa=plc::HpwlEvaluator{}.compute_total_hpwl(db, a);
+    plc::LocalSAPlacer sa(sa_config,42);sa.run(db,&a);
+    check(std::abs(sa.stats().initial_hpwl-before_sa)<1e-8);
+    check(std::abs(sa.stats().final_hpwl-plc::HpwlEvaluator{}.compute_total_hpwl(db,a))<1e-8);
     // Known center-relative pin coordinates: centers (5,5) and (22,5), weight 2 -> 34.
     plc::PlacementDB hd;hd.design.cells.resize(2);hd.design.cells[0].width=10;hd.design.cells[0].height=10;
     hd.design.cells[1].width=20;hd.design.cells[1].height=10;
