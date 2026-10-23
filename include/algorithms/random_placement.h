@@ -26,9 +26,10 @@ public:
 
     const RandomPlacementStats& stats() const { return stats_; }
 
-private:
+    // Bin overflow proxy shared by initializer comparisons; not exact geometric overlap.
     double estimate_overlap_area(const PlacementDB& db, const PlacementState& state) const;
 
+private:
     std::mt19937 rng_;
     std::size_t overlap_bins_x_;
     std::size_t overlap_bins_y_;

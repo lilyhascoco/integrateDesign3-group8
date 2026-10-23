@@ -1,3 +1,4 @@
+#include <stdexcept>
 #include "algorithms/quadratic_analytical_placement.h"
 
 #include <algorithm>
@@ -449,19 +450,18 @@ void QuadraticAnalyticalPlacement::clip_to_core(const PlacementDB& db,
         double& cx = (*centers_x)[i];
         double& cy = (*centers_y)[i];
 
-        // 由中心点反推左下角 & 右上角不越过 core 边界
-        if (cx - cell.width * 0.5 < core.lx + eps) {
-            cx = core.lx + cell.width * 0.5 + eps;
-        }
-        if (cx + cell.width * 0.5 > core.ux - eps) {
-            cx = core.ux - cell.width * 0.5 - eps;
-        }
-        if (cy - cell.height * 0.5 < core.ly + eps) {
-            cy = core.ly + cell.height * 0.5 + eps;
-        }
-        if (cy + cell.height * 0.5 > core.uy - eps) {
-            cy = core.uy - cell.height * 0.5 - eps;
-        }
+        // An epsilon margin cannot exceed the available slack. For a cell
+        // exactly as tall/wide as the core the only legal center has no margin.
+        const double slack_x = core.ux - core.lx - cell.width;
+        const double slack_y = core.uy - core.ly - cell.height;
+        if (slack_x < 0 || slack_y < 0 || !std::isfinite(cx) || !std::isfinite(cy))
+            throw std::runtime_error("Quadratic placement: invalid cell size or non-finite center");
+        const double margin_x = std::min(std::max(0.0, eps), slack_x * 0.5);
+        const double margin_y = std::min(std::max(0.0, eps), slack_y * 0.5);
+        cx = std::clamp(cx, core.lx + cell.width * 0.5 + margin_x,
+                            core.ux - cell.width * 0.5 - margin_x);
+        cy = std::clamp(cy, core.ly + cell.height * 0.5 + margin_y,
+                            core.uy - cell.height * 0.5 - margin_y);
     }
 }
 
@@ -493,8 +493,12 @@ void QuadraticAnalyticalPlacement::run(const PlacementDB& db, PlacementState* st
 
     state->resize(db.num_cells());
 
-    // 注意：run() 假设 state 已经包含了 .pl 中的初始位置/方向（同 LocalSAPlacer 的契约）。
-    // main.cpp 通过 result.db.init_state 传入，已经初始化完毕。
+    // resize clears positions and orientations; restore the input before solving.
+    // Fixed terminals must retain their original coordinates and orientations.
+    for (const auto& cell : db.design.cells) {
+        state->set_pos(cell.id, cell.init_x, cell.init_y);
+        state->set_orient(cell.id, cell.orient);
+    }
 
     // 建立 movable -> index 映射
     build_movable_index_map(db);
