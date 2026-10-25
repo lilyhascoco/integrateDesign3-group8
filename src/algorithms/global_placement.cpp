@@ -205,6 +205,20 @@ double clipped_area(double x, double y, double w, double h, const CoreRegion& co
     return (x1 - x0) * (y1 - y0);
 }
 
+// The global placer stores lower-left locations. Pin offsets are center-relative,
+// matching HpwlEvaluator's absolute-pin coordinate convention.
+double absolute_pin_x(const PlacementDB& db, const std::vector<double>& positions,
+                      const Pin& pin) {
+    const Cell& cell = db.cell(pin.cell_id);
+    return positions[pin.cell_id] + cell.width * 0.5 + pin.offset_x;
+}
+
+double absolute_pin_y(const PlacementDB& db, const std::vector<double>& positions,
+                      const Pin& pin) {
+    const Cell& cell = db.cell(pin.cell_id);
+    return positions[pin.cell_id] + cell.height * 0.5 + pin.offset_y;
+}
+
 // Accumulate the density contribution of a node into the bin grid. A node that
 // is smaller than a bin is smeared uniformly over a bin-sized window centred on
 // the node (the LengthScale idea of the task description), so the total mass the
@@ -271,8 +285,8 @@ double compute_hpwl(const PlacementDB& db, const std::vector<double>& px,
         double max_y = std::numeric_limits<double>::lowest();
         for (PinId pin_id : net.pin_ids) {
             const Pin& pin = db.pin(pin_id);
-            const double x = px[pin.cell_id] + pin.offset_x;
-            const double y = py[pin.cell_id] + pin.offset_y;
+            const double x = absolute_pin_x(db, px, pin);
+            const double y = absolute_pin_y(db, py, pin);
             min_x = std::min(min_x, x);
             min_y = std::min(min_y, y);
             max_x = std::max(max_x, x);
@@ -675,7 +689,7 @@ void GlobalPlacer::run(const PlacementDB& db, PlacementState* state) {
             double max_value = std::numeric_limits<double>::lowest();
             for (PinId pin_id : net.pin_ids) {
                 const Pin& pin = db.pin(pin_id);
-                const double value = pos_x[pin.cell_id] + pin.offset_x;
+                const double value = absolute_pin_x(db, pos_x, pin);
                 min_value = std::min(min_value, value);
                 max_value = std::max(max_value, value);
             }
@@ -687,7 +701,7 @@ void GlobalPlacer::run(const PlacementDB& db, PlacementState* state) {
                 std::size_t index = 0;
                 for (PinId pin_id : net.pin_ids) {
                     const Pin& pin = db.pin(pin_id);
-                    const double value = pos_x[pin.cell_id] + pin.offset_x;
+                    const double value = absolute_pin_x(db, pos_x, pin);
                     t_plus[index] = std::exp((value - max_value) / gamma);
                     t_minus[index] = std::exp((min_value - value) / gamma);
                     b_plus += t_plus[index];
@@ -701,7 +715,7 @@ void GlobalPlacer::run(const PlacementDB& db, PlacementState* state) {
                 index = 0;
                 for (PinId pin_id : net.pin_ids) {
                     const Pin& pin = db.pin(pin_id);
-                    const double value = pos_x[pin.cell_id] + pin.offset_x;
+                    const double value = absolute_pin_x(db, pos_x, pin);
                     const double positive =
                         t_plus[index] / std::max(b_plus, 1e-30) *
                         (1.0 + (value - center_plus) / gamma);
@@ -718,7 +732,7 @@ void GlobalPlacer::run(const PlacementDB& db, PlacementState* state) {
             max_value = std::numeric_limits<double>::lowest();
             for (PinId pin_id : net.pin_ids) {
                 const Pin& pin = db.pin(pin_id);
-                const double value = pos_y[pin.cell_id] + pin.offset_y;
+                const double value = absolute_pin_y(db, pos_y, pin);
                 min_value = std::min(min_value, value);
                 max_value = std::max(max_value, value);
             }
@@ -730,7 +744,7 @@ void GlobalPlacer::run(const PlacementDB& db, PlacementState* state) {
                 std::size_t index = 0;
                 for (PinId pin_id : net.pin_ids) {
                     const Pin& pin = db.pin(pin_id);
-                    const double value = pos_y[pin.cell_id] + pin.offset_y;
+                    const double value = absolute_pin_y(db, pos_y, pin);
                     t_plus[index] = std::exp((value - max_value) / gamma);
                     t_minus[index] = std::exp((min_value - value) / gamma);
                     b_plus += t_plus[index];
@@ -744,7 +758,7 @@ void GlobalPlacer::run(const PlacementDB& db, PlacementState* state) {
                 index = 0;
                 for (PinId pin_id : net.pin_ids) {
                     const Pin& pin = db.pin(pin_id);
-                    const double value = pos_y[pin.cell_id] + pin.offset_y;
+                    const double value = absolute_pin_y(db, pos_y, pin);
                     const double positive =
                         t_plus[index] / std::max(b_plus, 1e-30) *
                         (1.0 + (value - center_plus) / gamma);

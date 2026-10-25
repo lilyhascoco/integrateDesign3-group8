@@ -68,7 +68,7 @@ double BiCGSTAB(const CSRMatrix& A,
         return 0.0;
     }
 
-    std::vector<double> r(n), r_hat(n), p(n), v(n), s(n), t(n), y_vec(n, n);
+    std::vector<double> r(n), r_hat(n), p(n), v(n), s(n), t(n);
 
     // r = b - A*x0
     std::vector<double> ax(n);
@@ -77,6 +77,19 @@ double BiCGSTAB(const CSRMatrix& A,
         r[i] = b[i] - ax[i];
     }
     r_hat = r;
+    double rhs_norm = 0.0;
+    for (double value : b) {
+        rhs_norm = std::max(rhs_norm, std::fabs(value));
+    }
+    rhs_norm = std::max(rhs_norm, 1.0);
+
+    auto relative_infinity_norm = [rhs_norm](const std::vector<double>& residual) {
+        double norm = 0.0;
+        for (double value : residual) {
+            norm = std::max(norm, std::fabs(value));
+        }
+        return norm / rhs_norm;
+    };
 
     double rho_old = 1.0;
     double alpha = 1.0;
@@ -87,9 +100,13 @@ double BiCGSTAB(const CSRMatrix& A,
         r_dot_sq += r_hat[i] * r[i];
     }
 
-    double last_error = std::numeric_limits<double>::max();
+    double last_error = relative_infinity_norm(r);
     tolerance = std::max(tolerance, 1e-16);
     max_iterations = std::max<std::size_t>(1, max_iterations);
+    if (last_error < tolerance) {
+        if (iterations_used) *iterations_used = 0;
+        return last_error;
+    }
 
     for (std::size_t iter = 0; iter < max_iterations; ++iter) {
         const double rho_new = r_dot_sq;
@@ -127,16 +144,12 @@ double BiCGSTAB(const CSRMatrix& A,
         }
 
         // 检查 s 的范数，若已经很小，直接用 x += alpha * p 并退出
-        double s_norm_sq = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            s_norm_sq += s[i] * s[i];
-        }
-        if (std::sqrt(s_norm_sq) < tolerance) {
+        if (relative_infinity_norm(s) < tolerance) {
             for (std::size_t i = 0; i < n; ++i) {
                 (*x)[i] += alpha * p[i];
             }
             if (iterations_used) *iterations_used = iter + 1;
-            return std::sqrt(s_norm_sq);
+            return relative_infinity_norm(s);
         }
 
         A.multiply(s, &t);
@@ -153,12 +166,9 @@ double BiCGSTAB(const CSRMatrix& A,
             r[i] = s[i] - omega * t[i];
         }
 
-        // 计算当前残差误差（infinity norm）
-        double max_err = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            max_err = std::max(max_err, std::fabs(r[i]));
-        }
-        last_error = max_err;
+        // Use a scale-independent residual so the same tolerance is meaningful
+        // for both the sample and million-pin benchmarks.
+        last_error = relative_infinity_norm(r);
 
         // 更新 r_dot_sq 供下一次迭代用
         r_dot_sq = 0.0;
@@ -167,15 +177,15 @@ double BiCGSTAB(const CSRMatrix& A,
         }
         rho_old = rho_new;
 
-        if (max_err < tolerance) {
+        if (last_error < tolerance) {
             if (iterations_used) *iterations_used = iter + 1;
-            return max_err;
+            return last_error;
         }
 
         if (std::fabs(omega) < 1e-300) {
             // omega ≈ 0，BiCGSTAB breakdown
             if (iterations_used) *iterations_used = iter + 1;
-            return max_err;
+            return last_error;
         }
     }
 
@@ -206,6 +216,22 @@ void QuadraticAnalyticalPlacement::build_movable_index_map(const PlacementDB& db
             index_to_cell_.push_back(cell.id);
         }
     }
+
+    movable_count_ = index_to_cell_.size();
+    net_to_star_index_.assign(db.num_nets(), std::numeric_limits<std::size_t>::max());
+    std::size_t next_index = movable_count_;
+    for (const auto& net : db.design.nets) {
+        if (net.degree() < 3) {
+            continue;
+        }
+        const bool touches_movable = std::any_of(
+            net.pin_ids.begin(), net.pin_ids.end(), [&](PinId pin_id) {
+                return db.cell(db.pin(pin_id).cell_id).is_movable();
+            });
+        if (touches_movable) {
+            net_to_star_index_[net.id] = next_index++;
+        }
+    }
 }
 
 double QuadraticAnalyticalPlacement::pin_abs_x(const Cell& cell,
@@ -231,136 +257,142 @@ void QuadraticAnalyticalPlacement::build_system(const PlacementDB& db,
                                                   std::vector<double>* b_y,
                                                   std::vector<double>* new_centers_x,
                                                   std::vector<double>* new_centers_y) const {
-    const std::size_t n = index_to_cell_.size();
+    const std::size_t n = centers_x.size();
+    new_centers_x->assign(centers_x.begin(), centers_x.end());
+    new_centers_y->assign(centers_y.begin(), centers_y.end());
 
-    // new_centers_x / new_centers_y 初始化为当前位置，作为 solveWithGuess 的初值
-    new_centers_x->assign(n, 0.0);
-    new_centers_y->assign(n, 0.0);
-    for (std::size_t i = 0; i < n; ++i) {
-        (*new_centers_x)[i] = centers_x[i];
-        (*new_centers_y)[i] = centers_y[i];
-    }
-
-    // 先用“三元组”方式收集 A 的非零元素，再一次性压缩到 CSR
-    // 因为稀疏矩阵的行指针需要预先知道每行的非零元数量，
-    // 所以我们先遍历一次只统计每个矩阵行需要填充哪些列，
-    // 为了简化：先构建 std::vector<std::map<std::size_t, double>>，
-    // 再转成 CSR。对于典型规模（<100k cells）是可接受的。
+    // Matrix indices [0, movable_count_) are real cells. Net-star indices are
+    // appended afterwards and exist only while solving this linear system.
     std::vector<std::vector<std::pair<std::size_t, double>>> row_entries_x(n);
     std::vector<std::vector<std::pair<std::size_t, double>>> row_entries_y(n);
     b_x->assign(n, 0.0);
     b_y->assign(n, 0.0);
 
-    // 预分配一下，避免 push_back 过多 realloc
-    for (std::size_t i = 0; i < n; ++i) {
-        row_entries_x[i].reserve(4);
-        row_entries_y[i].reserve(4);
-    }
+    auto add_movable_star_edge =
+        [&](std::size_t cell_index, std::size_t star_index, double edge_weight,
+            double pin_offset, std::vector<std::vector<std::pair<std::size_t, double>>>* rows,
+            std::vector<double>* rhs) {
+            (*rows)[cell_index].push_back({cell_index, edge_weight});
+            (*rows)[cell_index].push_back({star_index, -edge_weight});
+            (*rows)[star_index].push_back({cell_index, -edge_weight});
+            (*rows)[star_index].push_back({star_index, edge_weight});
+            (*rhs)[cell_index] += 2.0 * edge_weight * pin_offset;
+            (*rhs)[star_index] -= 2.0 * edge_weight * pin_offset;
+        };
 
-    // 遍历所有 net 中的 pin 对
-    for (const auto& net : db.design.nets) {
-        const double weight = net.weight;
-        if (net.degree() < 2) continue;  // 单 pin net 不贡献线长
+    // A two-pin net is already a single O(1) edge. Keeping it direct avoids
+    // adding a numerically unnecessary auxiliary variable and preserves the
+    // prior two-pin system exactly.
+    auto add_two_pin_edge = [&](const Pin& pin_a, const Cell& cell_a,
+                                const Pin& pin_b, const Cell& cell_b,
+                                double net_weight) {
+        if (cell_a.id == cell_b.id) {
+            return;
+        }
+        const bool a_movable = cell_a.is_movable();
+        const bool b_movable = cell_b.is_movable();
+        const double center_ax = a_movable ? centers_x[cell_to_index_[cell_a.id]]
+                                           : state.x(cell_a.id) + cell_a.width * 0.5;
+        const double center_ay = a_movable ? centers_y[cell_to_index_[cell_a.id]]
+                                           : state.y(cell_a.id) + cell_a.height * 0.5;
+        const double center_bx = b_movable ? centers_x[cell_to_index_[cell_b.id]]
+                                           : state.x(cell_b.id) + cell_b.width * 0.5;
+        const double center_by = b_movable ? centers_y[cell_to_index_[cell_b.id]]
+                                           : state.y(cell_b.id) + cell_b.height * 0.5;
+        const double pa_x = pin_abs_x(cell_a, pin_a, center_ax);
+        const double pa_y = pin_abs_y(cell_a, pin_a, center_ay);
+        const double pb_x = pin_abs_x(cell_b, pin_b, center_bx);
+        const double pb_y = pin_abs_y(cell_b, pin_b, center_by);
+        const double w_x = net_weight / std::max(std::fabs(pa_x - pb_x), config_.min_distance);
+        const double w_y = net_weight / std::max(std::fabs(pa_y - pb_y), config_.min_distance);
 
-        const auto& pin_ids = net.pin_ids;
-        const std::size_t npins = pin_ids.size();
-
-        for (std::size_t a = 0; a < npins; ++a) {
-            const Pin& pin_a = db.pin(pin_ids[a]);
-            const Cell& cell_a = db.cell(pin_a.cell_id);
-            const bool a_movable = cell_a.is_movable();
-
-            // pin_a 的 cell center 坐标
-            double ca_x = 0.0, ca_y = 0.0;
-            if (a_movable) {
-                const std::size_t idx_a = cell_to_index_[cell_a.id];
-                ca_x = centers_x[idx_a];
-                ca_y = centers_y[idx_a];
-            } else {
-                // fixed cell：用 PlacementState 中的左下角坐标 + 半尺寸得到中心
-                ca_x = state.x(cell_a.id) + cell_a.width * 0.5;
-                ca_y = state.y(cell_a.id) + cell_a.height * 0.5;
+        if (a_movable && b_movable) {
+            const std::size_t i = cell_to_index_[cell_a.id];
+            const std::size_t j = cell_to_index_[cell_b.id];
+            for (auto* rows : {&row_entries_x, &row_entries_y}) {
+                const double w = (rows == &row_entries_x) ? w_x : w_y;
+                (*rows)[i].push_back({i, w});
+                (*rows)[i].push_back({j, -w});
+                (*rows)[j].push_back({i, -w});
+                (*rows)[j].push_back({j, w});
             }
+            (*b_x)[i] += 2.0 * w_x * (pin_a.offset_x - pin_b.offset_x);
+            (*b_x)[j] += 2.0 * w_x * (pin_b.offset_x - pin_a.offset_x);
+            (*b_y)[i] += 2.0 * w_y * (pin_a.offset_y - pin_b.offset_y);
+            (*b_y)[j] += 2.0 * w_y * (pin_b.offset_y - pin_a.offset_y);
+        } else if (a_movable) {
+            const std::size_t i = cell_to_index_[cell_a.id];
+            row_entries_x[i].push_back({i, w_x});
+            row_entries_y[i].push_back({i, w_y});
+            (*b_x)[i] += 2.0 * w_x * (pin_a.offset_x - pb_x);
+            (*b_y)[i] += 2.0 * w_y * (pin_a.offset_y - pb_y);
+        } else if (b_movable) {
+            const std::size_t j = cell_to_index_[cell_b.id];
+            row_entries_x[j].push_back({j, w_x});
+            row_entries_y[j].push_back({j, w_y});
+            (*b_x)[j] += 2.0 * w_x * (pin_b.offset_x - pa_x);
+            (*b_y)[j] += 2.0 * w_y * (pin_b.offset_y - pa_y);
+        }
+    };
 
-            const double pa_x = pin_abs_x(cell_a, pin_a, ca_x);
-            const double pa_y = pin_abs_y(cell_a, pin_a, ca_y);
+    for (const auto& net : db.design.nets) {
+        const std::size_t star_index = net_to_star_index_[net.id];
+        if (net.degree() == 2) {
+            const Pin& pin_a = db.pin(net.pin_ids[0]);
+            const Pin& pin_b = db.pin(net.pin_ids[1]);
+            add_two_pin_edge(pin_a, db.cell(pin_a.cell_id), pin_b, db.cell(pin_b.cell_id),
+                             net.weight);
+            continue;
+        }
+        if (star_index == std::numeric_limits<std::size_t>::max()) {
+            continue;
+        }
 
-            for (std::size_t b = a + 1; b < npins; ++b) {
-                const Pin& pin_b = db.pin(pin_ids[b]);
-                const Cell& cell_b = db.cell(pin_b.cell_id);
+        double min_x = std::numeric_limits<double>::max();
+        double max_x = std::numeric_limits<double>::lowest();
+        double min_y = std::numeric_limits<double>::max();
+        double max_y = std::numeric_limits<double>::lowest();
+        for (PinId pin_id : net.pin_ids) {
+            const Pin& pin = db.pin(pin_id);
+            const Cell& cell = db.cell(pin.cell_id);
+            const bool movable = cell.is_movable();
+            const double center_x = movable ? centers_x[cell_to_index_[cell.id]]
+                                            : state.x(cell.id) + cell.width * 0.5;
+            const double center_y = movable ? centers_y[cell_to_index_[cell.id]]
+                                            : state.y(cell.id) + cell.height * 0.5;
+            const double pin_x = pin_abs_x(cell, pin, center_x);
+            const double pin_y = pin_abs_y(cell, pin, center_y);
+            min_x = std::min(min_x, pin_x);
+            max_x = std::max(max_x, pin_x);
+            min_y = std::min(min_y, pin_y);
+            max_y = std::max(max_y, pin_y);
+        }
 
-                if (cell_a.id == cell_b.id) continue;  // 同一个 cell 的 pin 对跳过（没有自由度）
+        // Eliminating a star center with d equal-weight spokes creates a
+        // uniform clique whose pair weight is spoke_weight / d. For d == 2
+        // this exactly reproduces the prior pairwise reweighted objective.
+        const double degree = static_cast<double>(net.degree());
+        const double edge_weight_x =
+            degree * net.weight / std::max(max_x - min_x, config_.min_distance);
+        const double edge_weight_y =
+            degree * net.weight / std::max(max_y - min_y, config_.min_distance);
 
-                const bool b_movable = cell_b.is_movable();
-                double cb_x = 0.0, cb_y = 0.0;
-                if (b_movable) {
-                    const std::size_t idx_b = cell_to_index_[cell_b.id];
-                    cb_x = centers_x[idx_b];
-                    cb_y = centers_y[idx_b];
-                } else {
-                    cb_x = state.x(cell_b.id) + cell_b.width * 0.5;
-                    cb_y = state.y(cell_b.id) + cell_b.height * 0.5;
-                }
-
-                const double pb_x = pin_abs_x(cell_b, pin_b, cb_x);
-                const double pb_y = pin_abs_y(cell_b, pin_b, cb_y);
-
-                // 计算当前 pin 对的 x/y 距离，用于计算权重
-                // 这里的 weight 就是 net.weight，PDF 中说 w = 1 / distance 只影响 Kraftwerk2 的迭代权重策略，
-                // 但在初始布局（我们实现的这个版本）里，使用 net 自带 weight 即可。
-                // 为了数值稳定，我们使用 MIN_DISTANCE 做保护。
-                const double dist_x = std::max(std::fabs(pa_x - pb_x), config_.min_distance);
-                const double dist_y = std::max(std::fabs(pa_y - pb_y), config_.min_distance);
-
-                const double w_x = weight / dist_x;  // 用当前 pin 对 x 方向距离做权重
-                const double w_y = weight / dist_y;
-
-                if (a_movable && b_movable) {
-                    // case i) 两者都不是终端
-                    const std::size_t i_idx = cell_to_index_[cell_a.id];
-                    const std::size_t j_idx = cell_to_index_[cell_b.id];
-
-                    // x 方向
-                    row_entries_x[i_idx].push_back({i_idx, w_x});
-                    row_entries_x[i_idx].push_back({j_idx, -w_x});
-                    row_entries_x[j_idx].push_back({i_idx, -w_x});
-                    row_entries_x[j_idx].push_back({j_idx, w_x});
-                    // b[i] += 2*w*(o_a - o_b), b[j] += 2*w*(o_b - o_a)
-                    // 这里 o_a - o_b = pin_a.offset_x - pin_b.offset_x
-                    (*b_x)[i_idx] += 2.0 * w_x * (pin_a.offset_x - pin_b.offset_x);
-                    (*b_x)[j_idx] += 2.0 * w_x * (pin_b.offset_x - pin_a.offset_x);
-
-                    // y 方向
-                    row_entries_y[i_idx].push_back({i_idx, w_y});
-                    row_entries_y[i_idx].push_back({j_idx, -w_y});
-                    row_entries_y[j_idx].push_back({i_idx, -w_y});
-                    row_entries_y[j_idx].push_back({j_idx, w_y});
-                    (*b_y)[i_idx] += 2.0 * w_y * (pin_a.offset_y - pin_b.offset_y);
-                    (*b_y)[j_idx] += 2.0 * w_y * (pin_b.offset_y - pin_a.offset_y);
-
-                } else if (a_movable && !b_movable) {
-                    // case ii) a 不是终端，b 是终端
-                    const std::size_t i_idx = cell_to_index_[cell_a.id];
-
-                    // E = w * ((x_a + o_a) - pb_abs)^2  只含 x_a
-                    // A[i][i] += w, b[i] += 2*w*(o_a - pb_abs)
-                    row_entries_x[i_idx].push_back({i_idx, w_x});
-                    (*b_x)[i_idx] += 2.0 * w_x * (pin_a.offset_x - pb_x);
-
-                    row_entries_y[i_idx].push_back({i_idx, w_y});
-                    (*b_y)[i_idx] += 2.0 * w_y * (pin_a.offset_y - pb_y);
-
-                } else if (!a_movable && b_movable) {
-                    // case iii) a 是终端，b 不是终端
-                    const std::size_t j_idx = cell_to_index_[cell_b.id];
-
-                    row_entries_x[j_idx].push_back({j_idx, w_x});
-                    (*b_x)[j_idx] += 2.0 * w_x * (pin_b.offset_x - pa_x);
-
-                    row_entries_y[j_idx].push_back({j_idx, w_y});
-                    (*b_y)[j_idx] += 2.0 * w_y * (pin_b.offset_y - pa_y);
-                }
-                // 两者都 fixed：不进入矩阵，直接忽略
+        for (PinId pin_id : net.pin_ids) {
+            const Pin& pin = db.pin(pin_id);
+            const Cell& cell = db.cell(pin.cell_id);
+            if (cell.is_movable()) {
+                const std::size_t cell_index = cell_to_index_[cell.id];
+                add_movable_star_edge(cell_index, star_index, edge_weight_x, pin.offset_x,
+                                       &row_entries_x, b_x);
+                add_movable_star_edge(cell_index, star_index, edge_weight_y, pin.offset_y,
+                                       &row_entries_y, b_y);
+            } else {
+                const double fixed_x = state.x(cell.id) + cell.width * 0.5 + pin.offset_x;
+                const double fixed_y = state.y(cell.id) + cell.height * 0.5 + pin.offset_y;
+                row_entries_x[star_index].push_back({star_index, edge_weight_x});
+                row_entries_y[star_index].push_back({star_index, edge_weight_y});
+                (*b_x)[star_index] -= 2.0 * edge_weight_x * fixed_x;
+                (*b_y)[star_index] -= 2.0 * edge_weight_y * fixed_y;
             }
         }
     }
@@ -502,28 +534,59 @@ void QuadraticAnalyticalPlacement::run(const PlacementDB& db, PlacementState* st
 
     // 建立 movable -> index 映射
     build_movable_index_map(db);
-    const std::size_t n = index_to_cell_.size();
-    stats_.movable_cells = n;
-    if (n == 0) return;
+    const std::size_t movable_count = index_to_cell_.size();
+    stats_.movable_cells = movable_count;
+    if (movable_count == 0) return;
 
     // 初始化：把所有 movable cell 的中心均匀铺在 core 上，
     // 避免全部挤在 core center 导致互距离为 0、权重 w=1/distance 爆炸。
-    std::vector<double> centers_x(n), centers_y(n);
-    if (n == 1) {
+    std::vector<double> centers_x(movable_count), centers_y(movable_count);
+    if (movable_count == 1) {
         centers_x[0] = (core.lx + core.ux) * 0.5;
         centers_y[0] = (core.ly + core.uy) * 0.5;
     } else {
         // 近似方形网格，sqrt(n) 行
-        const std::size_t cols = static_cast<std::size_t>(std::ceil(std::sqrt(static_cast<double>(n))));
-        const std::size_t rows = (n + cols - 1) / cols;
+        const std::size_t cols =
+            static_cast<std::size_t>(std::ceil(std::sqrt(static_cast<double>(movable_count))));
+        const std::size_t rows = (movable_count + cols - 1) / cols;
         const double margin_x = core_width / static_cast<double>(cols + 1);
         const double margin_y = core_height / static_cast<double>(rows + 1);
-        for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t i = 0; i < movable_count; ++i) {
             const std::size_t r = i / cols;
             const std::size_t c = i % cols;
             centers_x[i] = core.lx + margin_x * static_cast<double>(c + 1);
             centers_y[i] = core.ly + margin_y * static_cast<double>(r + 1);
         }
+    }
+
+    // Append solver-only star centers. Each starts at the average current pin
+    // location; these entries are deliberately outside index_to_cell_.
+    const std::size_t total_unknowns = movable_count +
+        static_cast<std::size_t>(std::count_if(
+            net_to_star_index_.begin(), net_to_star_index_.end(),
+            [](std::size_t index) { return index != std::numeric_limits<std::size_t>::max(); }));
+    centers_x.resize(total_unknowns, 0.0);
+    centers_y.resize(total_unknowns, 0.0);
+    for (const auto& net : db.design.nets) {
+        const std::size_t star_index = net_to_star_index_[net.id];
+        if (star_index == std::numeric_limits<std::size_t>::max()) {
+            continue;
+        }
+        double sum_x = 0.0;
+        double sum_y = 0.0;
+        for (PinId pin_id : net.pin_ids) {
+            const Pin& pin = db.pin(pin_id);
+            const Cell& cell = db.cell(pin.cell_id);
+            const bool movable = cell.is_movable();
+            const double center_x = movable ? centers_x[cell_to_index_[cell.id]]
+                                            : state->x(cell.id) + cell.width * 0.5;
+            const double center_y = movable ? centers_y[cell_to_index_[cell.id]]
+                                            : state->y(cell.id) + cell.height * 0.5;
+            sum_x += pin_abs_x(cell, pin, center_x);
+            sum_y += pin_abs_y(cell, pin, center_y);
+        }
+        centers_x[star_index] = sum_x / static_cast<double>(net.degree());
+        centers_y[star_index] = sum_y / static_cast<double>(net.degree());
     }
 
     // 初始 HPWL

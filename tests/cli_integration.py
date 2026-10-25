@@ -20,6 +20,9 @@ with tempfile.TemporaryDirectory() as temp:
     text = run("--method", "compare", "--no-sa", "--output", str(output))
     assert text.count("INITIAL PLACEMENT:") == 3 and "LOCAL SA AFTER:" not in text
     assert text.count("Boundary/Fixed Violations: 0") == 3
+    assert "COMPARE SUMMARY" in text
+    assert all(label in text for label in ("method", "HPWL", "overflow%", "runtime", "status"))
+    assert all(method in text for method in ("random", "cluster", "quadratic"))
     comparison = {}
     for method in ("random", "cluster", "quadratic"):
         comparison[method] = (directory / f"initial.{method}.pl").read_bytes()
