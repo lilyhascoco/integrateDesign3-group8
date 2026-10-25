@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -25,8 +26,17 @@ struct Options {
     unsigned seed = 42;
     bool check_only = false, sa = false;
     bool run_gp = false;          // task 5: run global placement after initializer
+    std::size_t compare_timeout_ms = 0;  // 0 disables compare preflight timeout.
     plc::ClusteringConfig clustering;
     plc::GlobalPlacementConfig gp_config;
+};
+
+struct MethodSummary {
+    std::string method;
+    double hpwl = std::numeric_limits<double>::quiet_NaN();
+    double overflow_percent = std::numeric_limits<double>::quiet_NaN();
+    double runtime_ms = std::numeric_limits<double>::quiet_NaN();
+    std::string status = "completed";
 };
 
 void usage(const char* program) {
@@ -37,6 +47,7 @@ void usage(const char* program) {
               << "  --global                                     (run task-5 global placement)\n"
               << "  --iterations N  --target-density v  --target-overflow v\n"
               << "  --bins N  --quiet                            (GP tuning)\n"
+              << "  --compare-timeout-ms N                       (per-method preflight budget)\n"
               << "  --check-only  --output result.pl\n"
               << "\n"
               << "Task 4: --method random|cluster|quadratic each produce an initial placement.\n"
@@ -94,11 +105,53 @@ Options parse(int argc, char** argv) {
         else if (arg == "--target-density") o.gp_config.target_density = real();
         else if (arg == "--target-overflow") o.gp_config.target_overflow = real();
         else if (arg == "--bins") o.gp_config.max_bins = number();
+        else if (arg == "--compare-timeout-ms") o.compare_timeout_ms = number();
         else throw std::invalid_argument("Unknown option: " + arg);
     }
     if (o.method != "random" && o.method != "cluster" && o.method != "quadratic" && o.method != "compare")
         throw std::invalid_argument("Unknown method: " + o.method);
     return o;
+}
+
+std::string metric(double value, int precision) {
+    if (!std::isfinite(value)) return "n/a";
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(precision) << value;
+    return out.str();
+}
+
+// Placement algorithms do not expose cancellation points. Starting an
+// over-budget quadratic solve in a detached thread would keep consuming CPU
+// while later methods run, so compare uses a conservative preflight budget.
+bool exceeds_compare_budget(const plc::PlacementDB& db, const Options& options,
+                            const std::string& method) {
+    if (options.compare_timeout_ms == 0 || method != "quadratic") return false;
+
+    const plc::QuadraticConfig config;
+    const double work = static_cast<double>(db.num_pins()) *
+                        static_cast<double>(config.max_outer_iterations) *
+                        static_cast<double>(config.solver_max_iterations);
+    // Calibrated conservatively for the CSR + BiCGSTAB implementation. This
+    // is a scheduling estimate, not a replacement for algorithm convergence.
+    const double estimated_ms = work / 20000.0;
+    return estimated_ms > static_cast<double>(options.compare_timeout_ms);
+}
+
+void print_compare_summary(const std::vector<MethodSummary>& summaries) {
+    std::cout << "\n---------------COMPARE SUMMARY---------------\n"
+              << std::left << std::setw(12) << "method"
+              << std::right << std::setw(18) << "HPWL"
+              << std::setw(14) << "overflow%"
+              << std::setw(15) << "runtime"
+              << std::setw(14) << "status" << '\n';
+    for (const auto& summary : summaries) {
+        std::cout << std::left << std::setw(12) << summary.method
+                  << std::right << std::setw(18) << metric(summary.hpwl, 2)
+                  << std::setw(14) << metric(summary.overflow_percent, 2)
+                  << std::setw(15) << (std::isfinite(summary.runtime_ms)
+                      ? metric(summary.runtime_ms, 3) + " ms" : "n/a")
+                  << std::setw(14) << summary.status << '\n';
+    }
 }
 
 void validate(const plc::PlacementDB& db, const plc::PlacementState& state) {
@@ -136,9 +189,15 @@ void export_initial(const plc::PlacementDB& db, const plc::PlacementState& state
     std::cout << "    Placement Written To: " << path.string() << '\n';
 }
 
-void run_method(const plc::PlacementDB& db, const Options& options, const std::string& method) {
+MethodSummary run_method(const plc::PlacementDB& db, const Options& options,
+                         const std::string& method) {
     // Each method receives its own copy. No initializer sees another method's result.
     plc::PlacementState state = db.init_state;
+    if (state.size() != db.init_state.size()) {
+        throw std::runtime_error("Compare state copy has an unexpected size");
+    }
+    MethodSummary summary;
+    summary.method = method;
     const auto begin = std::chrono::steady_clock::now();
     std::cout << "\n---------------INITIAL PLACEMENT: " << method << "---------------\n";
     if (method == "random") {
@@ -161,19 +220,25 @@ void run_method(const plc::PlacementDB& db, const Options& options, const std::s
             << "\n    Final Y Error: " << stats.final_y_error << '\n';
         if (!std::isfinite(stats.final_x_error) || !std::isfinite(stats.final_y_error) ||
             stats.final_x_error >= plc::QuadraticConfig{}.target_error ||
-            stats.final_y_error >= plc::QuadraticConfig{}.target_error)
+            stats.final_y_error >= plc::QuadraticConfig{}.target_error) {
             std::cout << "    Solver Warning: residual tolerance not reached; inspect this result.\n";
+            summary.status = "incomplete";
+        }
     }
     auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
     plc::HpwlEvaluator evaluator;
     double hpwl = evaluator.compute_total_hpwl(db, state);
     if (!std::isfinite(hpwl)) throw std::runtime_error("Non-finite HPWL");
     const double overflow = plc::RandomPlacement(options.seed).estimate_overlap_area(db, state);
+    summary.hpwl = hpwl;
+    summary.overflow_percent = db.movable_cell_area() > 0
+        ? 100.0 * overflow / db.movable_cell_area() : 0.0;
+    summary.runtime_ms = ms;
     std::cout << "    Movable Cells: " << db.num_movable_cells()
         << "\n    Total HPWL: " << std::fixed << std::setprecision(2) << hpwl
         << "\n    Runtime: " << std::setprecision(3) << ms << " ms"
         << "\n    Bin Overflow Area: " << std::setprecision(2) << overflow
-        << "\n    Bin Overflow Ratio: " << (db.movable_cell_area() > 0 ? 100 * overflow / db.movable_cell_area() : 0) << "%\n";
+        << "\n    Bin Overflow Ratio: " << summary.overflow_percent << "%\n";
     validate(db, state);
 
     // ---- task 5: global placement after initializer ----
@@ -219,6 +284,8 @@ void run_method(const plc::PlacementDB& db, const Options& options, const std::s
             << "\n    Runtime: " << sa_ms << " ms\n";
         validate(db, state);
     }
+
+    return summary;
 }
 
 }  // namespace
@@ -234,7 +301,30 @@ int main(int argc, char** argv) {
         if (options.check_only) return 0;
         const std::vector<std::string> methods = options.method == "compare" ?
             std::vector<std::string>{"random", "cluster", "quadratic"} : std::vector<std::string>{options.method};
-        for (const auto& method : methods) run_method(result.db, options, method);
+        std::vector<MethodSummary> summaries;
+        summaries.reserve(methods.size());
+        for (const auto& method : methods) {
+            if (options.method == "compare" && exceeds_compare_budget(result.db, options, method)) {
+                std::cout << "\n---------------INITIAL PLACEMENT: " << method << "---------------\n"
+                          << "    Compare budget exceeded before start; method skipped.\n";
+                MethodSummary summary;
+                summary.method = method;
+                summary.status = "timeout";
+                summaries.push_back(std::move(summary));
+                continue;
+            }
+            try {
+                summaries.push_back(run_method(result.db, options, method));
+            } catch (const std::exception& error) {
+                if (options.method != "compare") throw;
+                std::cerr << "    " << method << " incomplete: " << error.what() << '\n';
+                MethodSummary summary;
+                summary.method = method;
+                summary.status = "incomplete";
+                summaries.push_back(std::move(summary));
+            }
+        }
+        if (options.method == "compare") print_compare_summary(summaries);
     } catch (const std::exception& error) {
         std::cerr << "Error: " << error.what() << '\n'; return 3;
     }

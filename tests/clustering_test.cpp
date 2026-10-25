@@ -7,6 +7,17 @@
 #include <stdexcept>
 void check(bool v) {if(!v) throw std::runtime_error("Test assertion failed");}
 int main() {
+    plc::CSRMatrix system(2);
+    system.row_ptr = {0, 2, 4};
+    system.col_idx = {0, 1, 0, 1};
+    system.values = {4.0, 1.0, 1.0, 3.0};
+    std::vector<double> rhs = {1.0, 2.0};
+    std::vector<double> solution = {0.0, 0.0};
+    const double relative_residual = plc::BiCGSTAB(system, rhs, &solution, 1e-10, 20);
+    check(relative_residual < 1e-10);
+    check(std::abs(solution[0] - 1.0 / 11.0) < 1e-8);
+    check(std::abs(solution[1] - 7.0 / 11.0) < 1e-8);
+
     plc::PlacementDB db; db.design.core={100,200,300,400};
     for(unsigned i=0;i<5;++i) {
         plc::Cell c; c.id=i;c.width=10+i*2;c.height=10;c.init_x=120;c.init_y=220;
