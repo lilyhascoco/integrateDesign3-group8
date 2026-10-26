@@ -1,0 +1,8 @@
+UCLA nodes 1.0
+# Three movable cells share a degree-3 net; term1 anchors each cell separately.
+NumNodes : 4
+NumTerminals : 1
+cellA 10 10
+cellB 10 10
+cellC 10 10
+term1 20 10 terminal

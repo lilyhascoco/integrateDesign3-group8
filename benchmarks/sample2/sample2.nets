@@ -1,0 +1,21 @@
+UCLA nets 1.0
+NumNets : 4
+NumPins : 9
+
+# This degree-3 net must use the star-model branch in the current implementation.
+NetDegree : 3 highFanout
+cellA I : 0 0
+cellB I : 0 0
+cellC I : 0 0
+
+NetDegree : 2 anchorA
+cellA I : 0 0
+term1 O : 0 0
+
+NetDegree : 2 anchorB
+cellB I : 0 0
+term1 O : 0 0
+
+NetDegree : 2 anchorC
+cellC I : 0 0
+term1 O : 0 0

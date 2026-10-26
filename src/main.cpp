@@ -18,6 +18,7 @@
 #include "io/summary_writer.h"
 #include "metrics/hpwl.h"
 #include "parser/bookshelf_loader.h"
+#include "visualization/cimg_visualizer.h"
 
 namespace {
 
@@ -26,6 +27,8 @@ struct Options {
     unsigned seed = 42;
     bool check_only = false, sa = false;
     bool run_gp = false;          // task 5: run global placement after initializer
+    std::string plot;
+    plc::PlotOptions plot_options;
     std::size_t compare_timeout_ms = 0;  // 0 disables compare preflight timeout.
     plc::ClusteringConfig clustering;
     plc::GlobalPlacementConfig gp_config;
@@ -49,6 +52,8 @@ void usage(const char* program) {
               << "  --bins N  --quiet                            (GP tuning)\n"
               << "  --compare-timeout-ms N                       (per-method preflight budget)\n"
               << "  --check-only  --output result.pl\n"
+              << "  --plot image.png|image.bmp  --plot-width N  --plot-margin N\n"
+              << "  --plot-rows|--no-plot-rows  --plot-nets\n"
               << "\n"
               << "Task 4: --method random|cluster|quadratic each produce an initial placement.\n"
               << "        --method compare runs all three independently.\n"
@@ -85,6 +90,12 @@ Options parse(int argc, char** argv) {
         };
         if (arg == "--method") o.method = value();
         else if (arg == "--output") o.output = value();
+        else if (arg == "--plot") o.plot = value();
+        else if (arg == "--plot-width") o.plot_options.width = number();
+        else if (arg == "--plot-margin") o.plot_options.margin = number();
+        else if (arg == "--plot-rows") o.plot_options.draw_rows = true;
+        else if (arg == "--no-plot-rows") o.plot_options.draw_rows = false;
+        else if (arg == "--plot-nets") o.plot_options.draw_nets = true;
         else if (arg == "--seed") {
             auto n = number();
             if (n > std::numeric_limits<unsigned>::max()) throw std::invalid_argument("Seed out of range");
@@ -189,6 +200,32 @@ void export_initial(const plc::PlacementDB& db, const plc::PlacementState& state
     std::cout << "    Placement Written To: " << path.string() << '\n';
 }
 
+std::string plot_path(const Options& options, const std::string& method,
+                      const std::string& stage, bool is_final) {
+    if (options.plot.empty()) return {};
+    std::filesystem::path path(options.plot);
+    if (!path.has_extension()) {
+        path += plc::CImgVisualizer::default_extension();
+    }
+
+    std::string stem = path.stem().string();
+    if (options.method == "compare") {
+        stem += "_" + method;
+    }
+    if (!is_final) {
+        stem += "." + stage;
+    }
+    return (path.parent_path() / (stem + path.extension().string())).string();
+}
+
+void plot_stage(const plc::PlacementDB& db, const plc::PlacementState& state,
+                const Options& options, const std::string& method,
+                const std::string& stage, bool is_final) {
+    const std::string path = plot_path(options, method, stage, is_final);
+    if (path.empty()) return;
+    plc::CImgVisualizer{}.write(db, state, path, options.plot_options);
+}
+
 MethodSummary run_method(const plc::PlacementDB& db, const Options& options,
                          const std::string& method) {
     // Each method receives its own copy. No initializer sees another method's result.
@@ -240,6 +277,7 @@ MethodSummary run_method(const plc::PlacementDB& db, const Options& options,
         << "\n    Bin Overflow Area: " << std::setprecision(2) << overflow
         << "\n    Bin Overflow Ratio: " << summary.overflow_percent << "%\n";
     validate(db, state);
+    plot_stage(db, state, options, method, "initial", !options.run_gp && !options.sa);
 
     // ---- task 5: global placement after initializer ----
     if (options.run_gp) {
@@ -264,6 +302,7 @@ MethodSummary run_method(const plc::PlacementDB& db, const Options& options,
             << "\n    Runtime: " << std::setprecision(3) << gp_ms << " ms\n";
         hpwl = gs.final_hpwl;  // update for SA below
         validate(db, state);
+        plot_stage(db, state, options, method, "global", !options.sa);
     }
 
     export_initial(db, state, options, method);
@@ -283,6 +322,7 @@ MethodSummary run_method(const plc::PlacementDB& db, const Options& options,
             << "\n    Final Temperature: " << placer.stats().final_temperature
             << "\n    Runtime: " << sa_ms << " ms\n";
         validate(db, state);
+        plot_stage(db, state, options, method, "sa", true);
     }
 
     return summary;
