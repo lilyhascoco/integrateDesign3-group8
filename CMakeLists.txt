@@ -31,9 +31,33 @@ add_executable(placer
     src/parser/pl_parser.cpp
     src/parser/scl_parser.cpp
     src/parser/wts_parser.cpp
+    src/visualization/cimg_visualizer.cpp
 )
 
 target_include_directories(placer PRIVATE include)
+target_compile_definitions(placer PRIVATE cimg_display=0)
+
+find_path(CIMG_INCLUDE_DIR NAMES CImg.h PATH_SUFFIXES CImg)
+if(CIMG_INCLUDE_DIR)
+    message(STATUS "CImg found: ${CIMG_INCLUDE_DIR}")
+    target_include_directories(placer PRIVATE "${CIMG_INCLUDE_DIR}")
+    target_compile_definitions(placer PRIVATE PLC_HAS_CIMG=1)
+
+    find_package(PNG QUIET)
+    if(PNG_FOUND)
+        message(STATUS "PNG found: PNG output is enabled")
+        target_link_libraries(placer PRIVATE PNG::PNG)
+        target_compile_definitions(placer PRIVATE PLC_HAS_PNG=1 cimg_use_png=1)
+    else()
+        message(WARNING "libpng not found: CImg visualization supports .bmp only")
+        target_compile_definitions(placer PRIVATE PLC_HAS_PNG=0)
+    endif()
+else()
+    message(WARNING
+        "CImg.h was not found: --plot will report an actionable error. "
+        "Install cimg-dev (Ubuntu) or provide CImg.h and reconfigure CMake.")
+    target_compile_definitions(placer PRIVATE PLC_HAS_CIMG=0 PLC_HAS_PNG=0)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
